@@ -4,13 +4,16 @@ package ldap
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io/ioutil"
 
-	"gopkg.in/ldap.v2"
+	"gopkg.in/ldap.v3"
 )
 
-type LDAPClient struct {
+// Client struct
+type Client struct {
 	Attributes         []string
 	Base               string
 	BindDN             string
@@ -25,10 +28,11 @@ type LDAPClient struct {
 	UseSSL             bool
 	SkipTLS            bool
 	ClientCertificates []tls.Certificate // Adding client certificates
+	CACertFiles        []string          // CA cert to verify ldaps server
 }
 
 // Connect connects to the ldap backend.
-func (lc *LDAPClient) Connect() error {
+func (lc *Client) Connect() error {
 	if lc.Conn == nil {
 		var l *ldap.Conn
 		var err error
@@ -54,6 +58,17 @@ func (lc *LDAPClient) Connect() error {
 			if lc.ClientCertificates != nil && len(lc.ClientCertificates) > 0 {
 				config.Certificates = lc.ClientCertificates
 			}
+			if lc.CACertFiles != nil && len(lc.CACertFiles) > 0 {
+				caCertPool := x509.NewCertPool()
+				for _, certFile := range lc.CACertFiles {
+					caCert, err := ioutil.ReadFile(certFile)
+					if err != nil {
+						return err
+					}
+					caCertPool.AppendCertsFromPEM(caCert)
+				}
+				config.RootCAs = caCertPool
+			}
 			l, err = ldap.DialTLS("tcp", address, config)
 			if err != nil {
 				return err
@@ -66,25 +81,25 @@ func (lc *LDAPClient) Connect() error {
 }
 
 // Close closes the ldap backend connection.
-func (lc *LDAPClient) Close() {
+func (lc *Client) Close() {
 	if lc.Conn != nil {
 		lc.Conn.Close()
 		lc.Conn = nil
 	}
 }
 
-// Authenticate authenticates the user against the ldap backend.
-func (lc *LDAPClient) Authenticate(username, password string) (bool, map[string]string, error) {
+// FindUser with specified username against the ldap backend.
+func (lc *Client) FindUser(username string) (map[string][]string, error) {
 	err := lc.Connect()
 	if err != nil {
-		return false, nil, err
+		return nil, err
 	}
 
 	// First bind with a read only user
 	if lc.BindDN != "" && lc.BindPassword != "" {
 		err := lc.Conn.Bind(lc.BindDN, lc.BindPassword)
 		if err != nil {
-			return false, nil, err
+			return nil, err
 		}
 	}
 
@@ -100,45 +115,64 @@ func (lc *LDAPClient) Authenticate(username, password string) (bool, map[string]
 
 	sr, err := lc.Conn.Search(searchRequest)
 	if err != nil {
-		return false, nil, err
+		return nil, err
 	}
 
 	if len(sr.Entries) < 1 {
-		return false, nil, errors.New("User does not exist")
+		return nil, errors.New("User does not exist")
 	}
 
 	if len(sr.Entries) > 1 {
-		return false, nil, errors.New("Too many entries returned")
+		return nil, errors.New("Too many entries returned")
 	}
 
 	userDN := sr.Entries[0].DN
-	user := map[string]string{}
+	user := map[string][]string{}
 	for _, attr := range lc.Attributes {
-		user[attr] = sr.Entries[0].GetAttributeValue(attr)
+		user[attr] = sr.Entries[0].GetAttributeValues(attr)
 	}
+	user["dn"] = []string{userDN}
+
+	return user, nil
+}
+
+// Authenticate authenticates the user against the ldap backend.
+func (lc *Client) Authenticate(username, password string) (bool, map[string][]string, error) {
+	user, err := lc.FindUser(username)
+	if err != nil {
+		return false, nil, err
+	}
+
+	userDN := user["dn"][0]
 
 	// Bind as the user to verify their password
-	err = lc.Conn.Bind(userDN, password)
-	if err != nil {
-		return false, user, err
-	}
-
-	// Rebind as the read only user for any further queries
-	if lc.BindDN != "" && lc.BindPassword != "" {
-		err = lc.Conn.Bind(lc.BindDN, lc.BindPassword)
+	if userDN != "" && password != "" {
+		err = lc.Conn.Bind(userDN, password)
 		if err != nil {
-			return true, user, err
+			return false, user, err
 		}
+	} else {
+		return false, user, errors.New("no username/passowrd provided")
 	}
 
 	return true, user, nil
 }
 
 // GetGroupsOfUser returns the group for a user.
-func (lc *LDAPClient) GetGroupsOfUser(username string) ([]string, error) {
+func (lc *Client) GetGroupsOfUser(username string) ([]string, error) {
 	err := lc.Connect()
 	if err != nil {
 		return nil, err
+	}
+
+	defer lc.Close()
+
+	// First bind with a read only user
+	if lc.BindDN != "" && lc.BindPassword != "" {
+		err = lc.Conn.Bind(lc.BindDN, lc.BindPassword)
+		if err != nil {
+			return []string{}, err
+		}
 	}
 
 	searchRequest := ldap.NewSearchRequest(

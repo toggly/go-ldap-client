@@ -32,6 +32,13 @@ func main() {
 	// It is the responsibility of the caller to close the connection
 	defer client.Close()
 
+	// user is a map[string][]string, for example:
+    // user["memberOf"]={
+    //     "cn=someone,ou=someunit,dc=edu,dc=cn",
+    //     "cn=someone,ou=someunit,dc=edu,dc=cn",
+    //     "cn=someone,ou=someunit,dc=edu,dc=cn",
+    // }
+
 	ok, user, err := client.Authenticate("username", "password")
 	if err != nil {
 		log.Fatalf("Error authenticating user %s: %+v", "username", err)
@@ -48,6 +55,11 @@ func main() {
 	log.Printf("Groups: %+v", groups) 
 }
 ```
+
+## Result of client.Authenticate  
+
+If client.Authenticate returns `ok == true`, the required information should be stored in `user`,  
+`user` is a `map[string][]string`, key of the map is `Attribute`, value is a `[]string`. 
 
 ## SSL (ldaps)
 
